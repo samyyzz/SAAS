@@ -1,0 +1,559 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------
+// Auth Service Models
+// ------------------------------------
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  lastLogin    DateTime?  @map("last_login")
+  authProvider String?    @map("auth_provider") // e.g., 'email_password', 'google'
+  oauthId      String?    @unique @map("oauth_id") // ID from external OAuth provider
+
+  MediaAssets      MediaAsset[] // sameer
+  ContentTemplates ContentTemplate[] // sameer
+  teams            Team[] // sameer
+  ContentApproval  ContentApproval[] // sameer
+
+  refreshTokens            RefreshToken[]
+  userProfile              UserProfile? // One-to-one relation with UserProfile
+  linkedAccounts           LinkedAccount[]
+  scheduledPosts           ScheduledPost[]
+  aiSuggestions            AISuggestion[]
+  collaborationTeamMembers TeamMember[]
+  affiliateLinks           AffiliateLink[]
+  linkInBioPages           LinkInBioPage[]
+  notificationSettings     UserNotificationSetting[]
+  notificationLogs         NotificationLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users") // Maps Prisma model name 'User' to 'users' table in DB
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique @map("token_hash")
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime @map("expires_at")
+  issuedAt  DateTime @default(now()) @map("issued_at")
+  isRevoked Boolean  @default(false) @map("is_revoked")
+
+  @@map("refresh_tokens")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// ------------------------------------
+// User Service Models
+// ------------------------------------
+model UserProfile {
+  id                String            @id @default(uuid())
+  userId            String            @unique
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName       String?           @map("display_name")
+  profilePictureUrl String?           @map("profile_picture_url")
+  timezone          String?
+  // notificationSettings Json? // Consider moving to dedicated NotificationService
+  // or a separate model for structured settings
+  subscription      UserSubscription?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_profiles")
+}
+
+model SubscriptionPlan {
+  id                String             @id @default(uuid())
+  name              String             @unique
+  description       String?
+  monthlyPrice      Float              @map("monthly_price")
+  featuresJson      Json?              @map("features_json") // e.g., max social accounts, max posts/month
+  userSubscriptions UserSubscription[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("subscription_plans")
+}
+
+model UserSubscription {
+  id                   String             @id @default(uuid())
+  userId               String             @unique
+  userProfile          UserProfile        @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  planId               String
+  plan                 SubscriptionPlan   @relation(fields: [planId], references: [id])
+  startDate            DateTime           @map("start_date")
+  endDate              DateTime?          @map("end_date")
+  status               SubscriptionStatus @default(ACTIVE)
+  stripeCustomerId     String?            @unique @map("stripe_customer_id")
+  stripeSubscriptionId String?            @unique @map("stripe_subscription_id")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_subscriptions")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  TRIAL
+  EXPIRED
+}
+
+// ------------------------------------
+// Social Media Integration Service Models
+// ------------------------------------
+model LinkedAccount {
+  id               String              @id @default(uuid())
+  userId           String
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform         SocialPlatform
+  platformUserId   String              @map("platform_user_id") // Unique ID from social platform
+  platformUsername String              @map("platform_username")
+  accessToken      String              @map("access_token") // Encrypted in application logic
+  refreshToken     String?             @map("refresh_token") // Encrypted
+  tokenExpiresAt   DateTime?           @map("token_expires_at")
+  permissionsScope Json?               @map("permissions_scope") // JSON of granted permissions
+  status           LinkedAccountStatus @default(ACTIVE)
+
+  postPlatforms          PostPlatform[] // Posts linked to this account
+  postPerformanceMetrics PostPerformanceMetric[]
+  accountAudienceMetrics AccountAudienceMetric[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, platform, platformUserId]) // A user can only link one account of a specific platform type
+  @@map("linked_accounts")
+}
+
+enum SocialPlatform {
+  INSTAGRAM
+  YOUTUBE
+  LINKEDIN
+  TWITTER
+  FACEBOOK
+  TIKTOK
+  PINTEREST
+  // Add other platforms as needed
+}
+
+enum LinkedAccountStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+// ------------------------------------
+// Content Service Models
+// ------------------------------------
+model MediaAsset {
+  id              String           @id @default(uuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fileName        String           @map("file_name")
+  fileType        String           @map("file_type") // MIME type: image/jpeg, video/mp4
+  storageUrl      String           @map("storage_url") // URL to S3/GCS
+  thumbnailUrl    String?          @map("thumbnail_url")
+  sizeBytes       BigInt           @map("size_bytes")
+  durationSeconds Int?             @map("duration_seconds") // For videos
+  status          MediaAssetStatus @default(UPLOADED)
+
+  scheduledPosts ScheduledPost[]
+  aiSuggestions  AISuggestion[] // AI suggestions might be tied to an asset before it's a post
+
+  createdAt DateTime @default(now()) @map("upload_date") // Renamed to upload_date as per DB model
+  updatedAt DateTime @updatedAt
+
+  @@map("media_assets")
+}
+
+enum MediaAssetStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model ContentTemplate {
+  id           String                  @id @default(uuid())
+  userId       String? // Nullable for global templates
+  user         User?                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  type         ContentTypeTemplateType // e.g., 'IMAGE_POST', 'VIDEO_INTRO'
+  templateData Json                    @map("template_data") // JSON for template structure/elements
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("content_templates")
+}
+
+enum ContentTypeTemplateType {
+  IMAGE_POST
+  VIDEO_INTRO
+  STORY_FRAME
+  YOUTUBE_THUMBNAIL
+  // Add more as needed
+}
+
+// ------------------------------------
+// Scheduling Service Models
+// ------------------------------------
+model ScheduledPost {
+  id             String              @id @default(uuid())
+  userId         String
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assetId        String
+  mediaAsset     MediaAsset          @relation(fields: [assetId], references: [id])
+  scheduledTime  DateTime            @map("scheduled_time")
+  contentCaption String?             @map("content_caption")
+  hashtags       String? // Comma-separated or JSON array if more complex
+  mentions       String? // Comma-separated or JSON array if more complex
+  status         ScheduledPostStatus @default(DRAFT)
+  postType       PostContentType // ENUM: 'FEED', 'STORY', 'REEL', 'TWEET'
+  errorMessage   String?             @map("error_message")
+  publishedUrl   String?             @unique @map("published_url") // URL of the live post on social media
+
+  postPlatforms          PostPlatform[] // For multi-platform posting
+  aiSuggestions          AISuggestion[] // AI suggestions directly linked to this post
+  postPerformanceMetrics PostPerformanceMetric[]
+  contentApprovals       ContentApproval[] // For collaboration workflow
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("scheduled_posts")
+}
+
+enum ScheduledPostStatus {
+  DRAFT
+  SCHEDULED
+  POSTING
+  POSTED
+  FAILED
+  CANCELED
+  NEEDS_APPROVAL // For collaboration workflow
+}
+
+enum PostContentType {
+  FEED // Instagram Feed, Facebook Post, LinkedIn Post
+  STORY // Instagram/Facebook Story
+  REEL // Instagram/Facebook Reel
+  SHORT // YouTube Short
+  VIDEO // YouTube Long-form Video
+  TWEET // Twitter Tweet
+  PIN // Pinterest Pin
+  // Add other specific post types
+}
+
+model PostPlatform {
+  id                   String             @id @default(uuid())
+  postId               String
+  scheduledPost        ScheduledPost      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  linkedAccountId      String             @map("linked_account_id")
+  linkedAccount        LinkedAccount      @relation(fields: [linkedAccountId], references: [id])
+  platformSpecificData Json?              @map("platform_specific_data") // e.g., Instagram story vs. feed settings
+  status               PostPlatformStatus @default(SCHEDULED)
+  errorMessage         String?            @map("error_message")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([postId, linkedAccountId]) // A specific post can only target a linked account once
+  @@map("post_platforms")
+}
+
+enum PostPlatformStatus {
+  SCHEDULED
+  POSTING
+  POSTED
+  FAILED
+}
+
+// ------------------------------------
+// AI Content Optimization Service Models*****************************************************
+// ------------------------------------
+model AISuggestion {
+  id             String         @id @default(uuid())
+  userId         String
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId         String? // Nullable, as suggestions might be for an asset before a post
+  scheduledPost  ScheduledPost? @relation(fields: [postId], references: [id])
+  assetId        String? // Nullable, suggestion could be asset-based
+  mediaAsset     MediaAsset?    @relation(fields: [assetId], references: [id])
+  suggestionType SuggestionType @map("suggestion_type") // e.g., 'HASHTAG', 'CAPTION', 'BEST_TIME'
+  suggestionData Json           @map("suggestion_data") // The actual AI-generated content or analysis
+  feedbackScore  Int?           @map("feedback_score") // 1-5, for user feedback
+
+  generatedAt DateTime @default(now()) @map("generated_at")
+  updatedAt   DateTime @updatedAt
+
+  @@map("ai_suggestions")
+}
+
+enum SuggestionType {
+  HASHTAG
+  CAPTION
+  BEST_TIME_TO_POST
+  SENTIMENT_ANALYSIS
+  CONTENT_REWRITE
+  // Add more as AI features evolve
+}
+
+// ------------------------------------
+// Analytics Service Models
+// ------------------------------------
+model PostPerformanceMetric {
+  id              String        @id @default(uuid())
+  postId          String
+  scheduledPost   ScheduledPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  linkedAccountId String        @map("linked_account_id")
+  linkedAccount   LinkedAccount @relation(fields: [linkedAccountId], references: [id])
+  platformPostId  String        @map("platform_post_id") // The actual ID on the social platform
+  metricDate      DateTime      @map("metric_date") // Date for which metrics are aggregated
+  impressions     BigInt?
+  reach           BigInt?
+  likes           BigInt?
+  comments        BigInt?
+  shares          BigInt?
+  clicks          BigInt?
+  engagementRate  Float?        @map("engagement_rate")
+
+  dataRetrievedAt DateTime @default(now()) @map("data_retrieved_at")
+
+  @@unique([platformPostId, metricDate]) // One metric record per post per day
+  @@map("post_performance_metrics")
+}
+
+model AccountAudienceMetric {
+  id               String        @id @default(uuid())
+  linkedAccountId  String        @map("linked_account_id")
+  linkedAccount    LinkedAccount @relation(fields: [linkedAccountId], references: [id], onDelete: Cascade)
+  metricDate       DateTime      @map("metric_date") // Date for which metrics are aggregated
+  followersCount   BigInt?       @map("followers_count")
+  newFollowers     BigInt?       @map("new_followers")
+  unfollowers      BigInt?
+  demographicsJson Json?         @map("demographics_json") // Aggregated demographics data
+
+  dataRetrievedAt DateTime @default(now()) @map("data_retrieved_at")
+
+  @@unique([linkedAccountId, metricDate]) // One metric record per account per day
+  @@map("account_audience_metrics")
+}
+
+// ------------------------------------
+// Collaboration Service Models
+// ------------------------------------
+model Team {
+  id          String @id @default(uuid())
+  name        String
+  ownerUserId String @map("owner_user_id")
+  owner       User   @relation(fields: [ownerUserId], references: [id])
+
+  members          TeamMember[]
+  contentApprovals ContentApproval[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("teams")
+}
+
+model TeamMember {
+  id     String           @id @default(uuid())
+  teamId String
+  team   Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId String
+  user   User             @relation(fields: [userId], references: [id])
+  role   TeamRole         @default(VIEWER)
+  status TeamMemberStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([teamId, userId]) // A user can only be in a team once
+  @@map("team_members")
+}
+
+enum TeamRole {
+  ADMIN // Full control over team
+  EDITOR // Can create/edit content
+  APPROVER // Can approve/reject content
+  VIEWER // Can only view content and analytics
+}
+
+enum TeamMemberStatus {
+  ACTIVE
+  INVITED
+  INACTIVE
+}
+
+model ContentApproval {
+  id             String         @id @default(uuid())
+  postId         String
+  scheduledPost  ScheduledPost  @relation(fields: [postId], references: [id], onDelete: Cascade)
+  approverUserId String         @map("approver_user_id")
+  approver       User           @relation(fields: [approverUserId], references: [id])
+  teamId         String? // Optional, if approval is for a specific team context
+  team           Team?          @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  status         ApprovalStatus @default(PENDING)
+  comments       String?
+  approvalDate   DateTime?      @map("approval_date")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("content_approvals")
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ------------------------------------
+// Monetization Service Models
+// ------------------------------------
+model AffiliateLink {
+  id          String  @id @default(uuid())
+  userId      String
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String // Internal name for the link
+  originalUrl String  @map("original_url")
+  shortUrl    String? @unique @map("short_url") // If Zappak provides custom short URLs
+  clicks      BigInt  @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("affiliate_links")
+}
+
+model LinkInBioPage {
+  id              String              @id @default(uuid())
+  userId          String              @unique
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  customSlug      String?             @unique @map("custom_slug") // e.g., zappak.com/username
+  title           String?
+  description     String?
+  profileImageUrl String?             @map("profile_image_url")
+  themeSettings   Json?               @map("theme_settings")
+  status          LinkInBioPageStatus @default(ACTIVE)
+
+  items LinkInBioItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("link_in_bio_pages")
+}
+
+enum LinkInBioPageStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model LinkInBioItem {
+  id         String            @id @default(uuid())
+  pageId     String            @map("page_id")
+  page       LinkInBioPage     @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  type       LinkInBioItemType
+  text       String?
+  url        String?
+  iconName   String?           @map("icon_name")
+  orderIndex Int               @default(0) @map("order_index")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("link_in_bio_items")
+}
+
+enum LinkInBioItemType {
+  LINK
+  SOCIAL_ICON
+  TEXT_BLOCK
+  VIDEO_EMBED
+}
+
+// ------------------------------------
+// Notifications Service Models
+// ------------------------------------
+model UserNotificationSetting {
+  id               String               @id @default(uuid())
+  userId           String
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notificationType NotificationCategory @map("notification_type") // E.g., 'POST_STATUS', 'APPROVAL_REQUEST'
+  emailEnabled     Boolean              @default(true) @map("email_enabled")
+  inAppEnabled     Boolean              @default(true) @map("in_app_enabled")
+  pushEnabled      Boolean              @default(false) @map("push_enabled")
+  smsEnabled       Boolean              @default(false) @map("sms_enabled")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, notificationType]) // One setting per notification type per user
+  @@map("user_notification_settings")
+}
+
+enum NotificationCategory {
+  POST_STATUS
+  APPROVAL_REQUEST
+  AI_SUGGESTION_READY
+  ACCOUNT_ALERT
+  SYSTEM_ANNOUNCEMENT
+  // Add other categories for fine-grained control
+}
+
+model NotificationLog {
+  id              String              @id @default(uuid())
+  userId          String
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type            NotificationLogType
+  message         String
+  status          NotificationStatus  @default(SENT)
+  sentAt          DateTime            @default(now()) @map("sent_at")
+  readAt          DateTime?           @map("read_at")
+  relatedEntityId String?             @map("related_entity_id") // UUID of related entity (e.g., postId, approvalId)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_logs")
+}
+
+enum NotificationLogType {
+  EMAIL
+  IN_APP
+  PUSH
+  SMS
+}
+
+enum NotificationStatus {
+  SENT
+  FAILED
+  READ
+  UNREAD
+}
